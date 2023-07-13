@@ -3,32 +3,74 @@
 # Add steps that analyze code, save the dist with the build record, publish to a PyPI-compatible index, and more:
 # https://docs.microsoft.com/azure/devops/pipelines/languages/python
 
+variables:
+    MAP_NPMTOKEN: $(NPMTOKEN) # Mapping secret var
+
 trigger:
-- main
+- none
 
 pool:
-  vmImage: ubuntu-latest
-strategy:
-  matrix:
-    Python38:
-      python.version: '3.8'
-    Python39:
-      python.version: '3.9'
-    Python310:
-      python.version: '3.10'
+  vmImage: 'ubuntu-latest'
 
-steps:
-- task: UsePythonVersion@0
+steps: # Checking out connected repo
+- checkout: self
+  persistCredentials: true
+  clean: true
+    
+- task: npmAuthenticate@0
   inputs:
-    versionSpec: '$(python.version)'
-  displayName: 'Use Python $(python.version)'
+    workingFile: .npmrc
+    customEndpoint: 'my-npm-connection'
+    
+- task: NodeTool@0
+  inputs:
+    versionSpec: '16.x'
+  displayName: 'Install Node.js'
 
 - script: |
-    python -m pip install --upgrade pip
-    pip install -r requirements.txt
-  displayName: 'Install dependencies'
+    npm install
+  displayName: 'npm install'
 
 - script: |
-    pip install pytest pytest-azurepipelines
-    pytest
-  displayName: 'pytest'
+    npm pack
+  displayName: 'Package for release'
+
+- bash: | # Grab the package version
+    v=`node -p "const p = require('./package.json'); p.version;"`
+    echo "##vso[task.setvariable variable=packageVersion]$v"
+
+- task: CopyFiles@2
+  inputs:
+      contents: '*.tgz'
+      targetFolder: $(Build.ArtifactStagingDirectory)/npm
+  displayName: 'Copy archives to artifacts staging directory'
+
+- task: CopyFiles@2
+  inputs:
+    sourceFolder: '$(Build.SourcesDirectory)'
+    contents: 'package.json' 
+    targetFolder: $(Build.ArtifactStagingDirectory)/npm
+  displayName: 'Copy package.json'
+
+- task: PublishBuildArtifacts@1 
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/npm'
+    artifactName: npm
+  displayName: 'Publish npm artifact'
+
+- script: |  # Config can be set in .npmrc
+    npm config set //registry.npmjs.org/:_authToken=$(MAP_NPMTOKEN) 
+    npm config set scope "@myscope"
+    # npm config list
+    # npm --version
+    npm version patch --force
+    npm publish --access public
+
+- task: CmdLine@2 # Push changes to GitHub (substitute your repo)
+  inputs:
+    script: |
+      git config --global user.email "username@contoso.com"
+      git config --global user.name "Azure Pipeline"
+      git add package.json
+      git commit -a -m "Test Commit from Azure DevOps"
+      git push -u origin HEAD:main
